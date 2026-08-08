@@ -1,0 +1,49 @@
+bash
+
+mkdir -p /mnt/user-data/outputs
+cd /home/claude
+zip -r -q /mnt/user-data/outputs/hplc-sim-module.zip hplc-sim-module -x "*.pyc" -x "__pycache__/*"
+cp -r hplc-sim-module/dashboard /mnt/user-data/outputs/hplc-dashboard
+ls -la /mnt/user-data/outputs/
+unzip -l /mnt/user-data/outputs/hplc-sim-module.zip
+Output
+
+total 48
+drwxr-xr-x 1 claude ubuntu     0 Aug  8 13:40 .
+drwxr-xr-x 5 root   root    4096 Aug  8 13:30 ..
+drwxr-xr-x 1 claude ubuntu     0 Aug  8 13:40 hplc-dashboard
+-rw-r--r-- 1 claude ubuntu 44128 Aug  8 13:40 hplc-sim-module.zip
+Archive:  /mnt/user-data/outputs/hplc-sim-module.zip
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+        0  2026-08-08 13:37   hplc-sim-module/
+      272  2026-08-08 13:36   hplc-sim-module/requirements.txt
+        0  2026-08-08 13:35   hplc-sim-module/hplc_sim/
+     9058  2026-08-08 13:32   hplc-sim-module/hplc_sim/simulator.py
+      341  2026-08-08 13:34   hplc-sim-module/hplc_sim/__init__.py
+     3643  2026-08-08 13:35   hplc-sim-module/hplc_sim/metrics.py
+     3770  2026-08-08 13:34   hplc-sim-module/hplc_sim/optimization.py
+        0  2026-08-08 13:36   hplc-sim-module/hplc_sim/integrations/
+     2582  2026-08-08 13:33   hplc-sim-module/hplc_sim/integrations/chromrs_bridge.py
+      307  2026-08-08 13:32   hplc-sim-module/hplc_sim/integrations/__init__.py
+     3051  2026-08-08 13:33   hplc-sim-module/hplc_sim/integrations/github_datasets.py
+     1629  2026-08-08 13:32   hplc-sim-module/hplc_sim/integrations/pubchem.py
+     1956  2026-08-08 13:34   hplc-sim-module/hplc_sim/integrations/lims.py
+     2186  2026-08-08 13:33   hplc-sim-module/hplc_sim/integrations/retip_client.py
+     1561  2026-08-08 13:32   hplc-sim-module/hplc_sim/integrations/nist_webbook.py
+        0  2026-08-08 13:36   hplc-sim-module/hplc_sim/integrations/__pycache__/
+     5227  2026-08-08 13:34   hplc-sim-module/hplc_sim/api.py
+     2791  2026-08-08 13:31   hplc-sim-module/hplc_sim/components.py
+        0  2026-08-08 13:36   hplc-sim-module/hplc_sim/__pycache__/
+     6030  2026-08-08 13:36   hplc-sim-module/hplc_sim/models.py
+    11051  2026-08-08 13:37   hplc-sim-module/README.md
+        0  2026-08-08 13:36   hplc-sim-module/tests/
+     1960  2026-08-08 13:36   hplc-sim-module/tests/validate_against_reference.py
+     2640  2026-08-08 13:35   hplc-sim-module/tests/test_models.py
+      764  2026-08-08 13:36   hplc-sim-module/tests/reference_mixture_data.csv
+        0  2026-08-08 13:40   hplc-sim-module/dashboard/
+    18359  2026-08-08 13:40   hplc-sim-module/dashboard/app.js
+    12888  2026-08-08 13:38   hplc-sim-module/dashboard/index.html
+     7524  2026-08-08 13:39   hplc-sim-module/dashboard/engine.js
+---------                     -------
+    99590                     29 files
