@@ -1,0 +1,41 @@
+name: Ежедневное обновление данных
+
+on:
+  schedule:
+    # Запуск каждый день в 3:00 UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    # Возможность запуска вручную из интерфейса GitHub
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Проверка репозитория
+        uses: actions/checkout@v4
+
+      - name: Настройка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Запуск всех интеграций
+        env:
+          DRUGBANK_API_KEY: ${{ secrets.DRUGBANK_API_KEY }}
+        run: |
+          python src/orchestrator.py
+
+      - name: Коммит и пуш изменений
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/
+          git diff --staged --quiet || git commit -m "Автоматическое обновление данных $(date +'%Y-%m-%d')"
+          git push
