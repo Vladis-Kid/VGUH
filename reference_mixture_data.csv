@@ -1,0 +1,11 @@
+compound_name,k_w,S,tR_observed,phi,column,note
+Uracil,0.3,1.0,1.05,0.30,C18_150x4.6_3.5um,void marker (used only for t0 sanity check)
+Acetanilide,3.2,3.1,2.95,0.30,C18_150x4.6_3.5um,literature seed value
+Caffeine,4.0,3.4,3.35,0.30,C18_150x4.6_3.5um,literature seed value
+Phenol,3.6,3.3,3.10,0.30,C18_150x4.6_3.5um,literature seed value
+Benzyl_alcohol,2.8,3.0,2.70,0.30,C18_150x4.6_3.5um,literature seed value
+Methylparaben,6.5,3.8,4.55,0.30,C18_150x4.6_3.5um,literature seed value
+Propylparaben,14.0,4.3,6.90,0.30,C18_150x4.6_3.5um,literature seed value
+Naphthalene,22.0,4.6,8.60,0.30,C18_150x4.6_3.5um,literature seed value
+Toluene,17.0,4.4,7.55,0.30,C18_150x4.6_3.5um,literature seed value
+Anthracene,55.0,5.3,12.40,0.30,C18_150x4.6_3.5um,literature seed value

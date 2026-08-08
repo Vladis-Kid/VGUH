@@ -1,17 +1,11 @@
-# Основные зависимости
-requests>=2.31.0
-python-dotenv>=1.0.0
-pandas>=2.0.0
-pyyaml>=6.0
+numpy>=1.24
+scipy>=1.10
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.5
+requests>=2.31
+PyYAML>=6.0
 
-# Для PubChem
-pubchempy>=1.0.4
-
-# Для ChEBI
-bioservices>=1.11.0
-
-# Для работы с OpenChrom (конвертация форматов)
-# openchrom-client  # если есть официальный клиент
-
-# Для работы с SQLite (DrugBank)
-sqlalchemy>=2.0.0
+# optional integrations (install as needed)
+# pyretip           # https://github.com/oloBion/Retip  (ML retention prediction)
+# pytest            # for running tests/

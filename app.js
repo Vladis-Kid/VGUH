@@ -1,0 +1,444 @@
+/* app.js — UI wiring + Plotly rendering in Empower/OpenLab visual style. */
+
+let compounds = [
+  { name: 'Фенол', k_w: 3.6, S: 3.3, dH_J_mol: -20000, tau_rel: 0.15, response_factor: 1.0 },
+  { name: 'Кофеин', k_w: 4.0, S: 3.4, dH_J_mol: -20000, tau_rel: 0.12, response_factor: 1.3 },
+  { name: 'Метилпарабен', k_w: 6.5, S: 3.8, dH_J_mol: -21000, tau_rel: 0.18, response_factor: 0.9 },
+  { name: 'Пропилпарабен', k_w: 14.0, S: 4.3, dH_J_mol: -22000, tau_rel: 0.22, response_factor: 0.85 },
+  { name: 'Нафталин', k_w: 22.0, S: 4.6, dH_J_mol: -23000, tau_rel: 0.28, response_factor: 1.1 },
+];
+
+let overlayRuns = [];       // [{label, color, result}]
+let lastResult = null;
+let apiBase = null;
+const OVERLAY_COLORS = ['#1554c7', '#1f8a55', '#7b3fa0'];
+
+function $(id) { return document.getElementById(id); }
+
+function renderCompoundRows() {
+  const body = $('compoundsBody');
+  body.innerHTML = '';
+  compounds.forEach((c, idx) => {
+    const row = document.createElement('div');
+    row.className = 'compound-row';
+    row.innerHTML = `
+      <input data-idx="${idx}" data-f="name" value="${c.name}" title="Название">
+      <input data-idx="${idx}" data-f="k_w" type="number" step="0.1" value="${c.k_w}" title="k_w">
+      <input data-idx="${idx}" data-f="S" type="number" step="0.1" value="${c.S}" title="S">
+      <button data-idx="${idx}" title="Удалить">✕</button>`;
+    body.appendChild(row);
+  });
+  body.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('change', e => {
+      const idx = +e.target.dataset.idx, f = e.target.dataset.f;
+      compounds[idx][f] = (f === 'name') ? e.target.value : parseFloat(e.target.value);
+    });
+  });
+  body.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', e => {
+      compounds.splice(+e.target.dataset.idx, 1);
+      renderCompoundRows();
+    });
+  });
+}
+
+function collectState() {
+  const gradPairs = $('gradProfile').value.split(';').map(s => {
+    const [t, p] = s.split(',').map(Number);
+    return { time_min: t, phi_B: p / 100 };
+  }).filter(g => !isNaN(g.time_min));
+
+  return {
+    column: {
+      name: 'Колонка (' + $('colType').value + ')',
+      ctype: $('colType').value,
+      length_mm: parseFloat($('colLength').value),
+      id_mm: parseFloat($('colID').value),
+      particle_um: parseFloat($('colParticle').value),
+      N_per_m_nominal: parseFloat($('colNnom').value),
+    },
+    mobilePhase: {
+      flow_ml_min: parseFloat($('flow').value),
+      temperature_C: parseFloat($('temp').value),
+    },
+    method: {
+      mode: $('mode').value,
+      isocratic_phi: parseFloat($('isoPhi').value),
+      gradient_profile: gradPairs,
+      run_time_min: parseFloat($('runTime').value),
+      dwell_time_min: parseFloat($('dwell').value),
+    },
+    detector: {
+      dtype: $('detType').value,
+      wavelength_nm: parseFloat($('wavelength').value),
+      noise_std: parseFloat($('noise').value),
+      baseline_drift_per_min: 0.01,
+      threshold_mAU: parseFloat($('threshold').value),
+    },
+    compounds,
+  };
+}
+
+async function runSimulation() {
+  const state = collectState();
+  $('footerLeft').textContent = 'Выполняется расчёт…';
+  let result;
+  if (apiBase) {
+    try {
+      result = await runViaApi(state);
+    } catch (e) {
+      console.warn('API недоступен, использую локальный движок:', e);
+      result = Engine.runSimulation(state);
+    }
+  } else {
+    result = Engine.runSimulation(state);
+  }
+  lastResult = result;
+  renderAll(result, state);
+  $('footerLeft').textContent = `Готово · ${result.peaks.length} пиков · ${new Date().toLocaleTimeString()}`;
+}
+
+async function runViaApi(state) {
+  const sid = 'dash-' + Date.now();
+  await fetch(`${apiBase}/sessions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sid, column: state.column, mobile_phase: state.mobilePhase,
+      compounds: state.compounds, mode: state.method.mode,
+      isocratic_phi: state.method.isocratic_phi,
+      gradient_profile: state.method.mode !== 'isocratic' ? state.method.gradient_profile : null,
+      run_time_min: state.method.run_time_min,
+    }),
+  });
+  const r = await fetch(`${apiBase}/sessions/${sid}/run`, { method: 'POST' });
+  return await r.json();
+}
+
+// ---------------- Label collision avoidance ----------------
+function assignLabelLevels(peaks, timeRange) {
+  const minGap = timeRange * 0.045;
+  const sorted = [...peaks].sort((a, b) => a.tR - b.tR);
+  let lastX = -Infinity, level = 0;
+  const levels = new Map();
+  for (const p of sorted) {
+    if (p.tR - lastX < minGap) {
+      level = (level + 1) % 3;
+    } else {
+      level = 0;
+    }
+    levels.set(p.name + p.tR, level);
+    lastX = p.tR;
+  }
+  return levels;
+}
+
+// ---------------- Main chromatogram rendering ----------------
+function renderChromatogram(primaryResult, primaryState) {
+  const traces = [];
+  const annotations = [];
+  const shapes = [];
+
+  const allResults = [{ label: 'Текущий метод', color: OVERLAY_COLORS[0], result: primaryResult }, ...overlayRuns];
+  const timeRange = Math.max(...primaryResult.time_min) - Math.min(...primaryResult.time_min);
+
+  allResults.forEach((run, ri) => {
+    const color = run.color;
+    traces.push({
+      x: run.result.time_min, y: run.result.signal_mAU, type: 'scatter', mode: 'lines',
+      line: { color, width: 1.6, shape: 'linear' },
+      name: run.label,
+      hovertemplate: 'т=%{x:.2f} мин<br>сигнал=%{y:.2f} мАУ<extra>' + run.label + '</extra>',
+    });
+
+    if (ri === 0) {
+      // baseline (zero line), slightly bolder
+      shapes.push({
+        type: 'line', x0: 0, x1: Math.max(...run.result.time_min), y0: 0, y1: 0,
+        line: { color: '#333', width: 1.4 }, layer: 'above',
+      });
+      // threshold line
+      const thr = primaryState.detector.threshold_mAU;
+      shapes.push({
+        type: 'line', x0: 0, x1: Math.max(...run.result.time_min), y0: thr, y1: thr,
+        line: { color: '#b0b6bf', width: 1, dash: 'dot' }, layer: 'below',
+      });
+      annotations.push({
+        x: Math.max(...run.result.time_min) * 0.985, y: thr, xanchor: 'right', yanchor: 'bottom',
+        text: 'Порог отсечения', showarrow: false, font: { size: 9, color: '#8b93a1' },
+      });
+
+      const levels = assignLabelLevels(run.result.peaks, timeRange);
+      const yMax = Math.max(...run.result.signal_mAU);
+
+      run.result.peaks.forEach((p, i) => {
+        // integration start/stop markers
+        [p.start, p.stop].forEach(xPos => {
+          shapes.push({
+            type: 'line', x0: xPos, x1: xPos, y0: 0, y1: p.height_mAU * 0.98,
+            line: { color: '#d97706', width: 1, dash: 'dot' },
+          });
+        });
+        // peak baseline segment
+        shapes.push({
+          type: 'line', x0: p.start, x1: p.stop, y0: 0, y1: 0,
+          line: { color: '#d97706', width: 1.6 },
+        });
+
+        const level = levels.get(p.name + p.tR) || 0;
+        const yShift = 14 + level * 15;
+        annotations.push({
+          x: p.tR, y: p.height_mAU, xanchor: 'center', yanchor: 'bottom',
+          yshift: yShift,
+          text: `<b>${p.name}</b><br><i>tR = ${p.tR.toFixed(2)} мин</i>`,
+          showarrow: false,
+          font: { size: 10.5, color: '#1c2430', family: 'Arial, Helvetica, sans-serif' },
+          align: 'center',
+        });
+      });
+    }
+  });
+
+  const layout = {
+    paper_bgcolor: '#ffffff',
+    plot_bgcolor: '#ffffff',
+    margin: { l: 60, r: 20, t: 10, b: 46 },
+    xaxis: {
+      title: { text: 'Время, мин', font: { size: 12, color: '#333' } },
+      gridcolor: '#e3e6ea', griddash: 'dot', zeroline: false,
+      dtick: timeRange > 20 ? 2 : 1, showline: true, linecolor: '#8b93a1', mirror: true,
+      tickfont: { size: 10.5 },
+    },
+    yaxis: {
+      title: { text: 'мАУ', font: { size: 12, color: '#333' } },
+      gridcolor: '#e3e6ea', griddash: 'dot', zeroline: false,
+      showline: true, linecolor: '#8b93a1', mirror: true, tickfont: { size: 10.5 },
+    },
+    legend: { orientation: 'h', x: 1, xanchor: 'right', y: 1.08, font: { size: 10.5 } },
+    annotations,
+    shapes,
+    hovermode: 'closest',
+    dragmode: 'zoom',
+  };
+
+  Plotly.newPlot('chromPlot', traces, layout, {
+    displaylogo: false, doubleClick: 'reset',
+    modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+    responsive: true,
+  });
+}
+
+// ---------------- KPI tiles ----------------
+function tone(value, good, warn) {
+  if (value === null || value === undefined) return 'kpi-neutral';
+  if (value >= good) return 'kpi-good';
+  if (value >= warn) return 'kpi-warn';
+  return 'kpi-bad';
+}
+
+function renderKPIs(result) {
+  const NperM = result.column ? null : null; // computed below from state instead
+  const kpis = [
+    { label: 'Разрешение Rs(min)', value: result.Rs_min !== null ? result.Rs_min.toFixed(2) : '—', cls: tone(result.Rs_min, 1.5, 1.0) },
+    { label: 'Эффективность N (ср.)', value: result.N_mean ? Math.round(result.N_mean).toLocaleString('ru-RU') : '—', cls: 'kpi-neutral' },
+    { label: 'Давление, бар', value: result.pressure_bar ? result.pressure_bar.toFixed(0) : '—', cls: tone(400 - (result.pressure_bar || 0), 200, 100) },
+    { label: 't0 (мёртвое время), мин', value: result.t0_min.toFixed(2), cls: 'kpi-neutral' },
+    { label: 'Пиков обнаружено', value: result.peaks.length, cls: 'kpi-neutral' },
+  ];
+  $('kpiRow').innerHTML = kpis.map(k => `
+    <div class="kpi-tile ${k.cls}">
+      <div class="label">${k.label}</div>
+      <div class="value">${k.value}</div>
+    </div>`).join('');
+}
+
+// ---------------- Results table ----------------
+function renderTable(result) {
+  const tbody = document.querySelector('#resultsTable tbody');
+  tbody.innerHTML = result.peaks.map((p, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${p.name}</td>
+      <td>${p.tR.toFixed(3)}</td>
+      <td>${p.k.toFixed(3)}</td>
+      <td>${p.alpha_vs_prev ? p.alpha_vs_prev.toFixed(3) : '—'}</td>
+      <td>${p.Rs_vs_prev ? p.Rs_vs_prev.toFixed(2) : '—'}</td>
+      <td>${Math.round(p.N).toLocaleString('ru-RU')}</td>
+      <td>${p.HETP_um.toFixed(1)}</td>
+      <td>${p.area.toFixed(0)}</td>
+      <td>${p.height_mAU.toFixed(2)}</td>
+      <td>${(1 + p.tau / p.sigma).toFixed(2)}</td>
+    </tr>`).join('');
+}
+
+// ---------------- DAD contour (simulated 2D absorbance map) ----------------
+function renderDAD(result) {
+  const wavelengths = [];
+  for (let w = 200; w <= 400; w += 5) wavelengths.push(w);
+  const tSample = result.time_min.filter((_, i) => i % 20 === 0);
+  const z = tSample.map(t => {
+    const baseSignal = result.signal_mAU[result.time_min.findIndex(tt => tt >= t)] || 0;
+    return wavelengths.map(w => {
+      // crude synthetic UV envelope centered around 254/280nm
+      const env = Math.exp(-Math.pow((w - 254) / 40, 2)) * 0.7 + Math.exp(-Math.pow((w - 280) / 30, 2)) * 0.3;
+      return Math.max(baseSignal, 0) * env;
+    });
+  });
+  Plotly.newPlot('ddadPlot', [{
+    z, x: tSample, y: wavelengths, type: 'heatmap', colorscale: 'YlGnBu',
+    showscale: true, colorbar: { thickness: 10, title: { text: 'мАУ', font: { size: 9 } } },
+  }], {
+    margin: { l: 46, r: 10, t: 6, b: 34 }, paper_bgcolor: '#fff', plot_bgcolor: '#fff',
+    xaxis: { title: { text: 'Время, мин', font: { size: 10 } }, tickfont: { size: 9 } },
+    yaxis: { title: { text: 'λ, нм', font: { size: 10 } }, tickfont: { size: 9 } },
+  }, { displaylogo: false, responsive: true });
+}
+
+// ---------------- Calibration curve (demo) ----------------
+function renderCalibration(result) {
+  if (!result.peaks.length) return;
+  const baseArea = result.peaks[0].area;
+  const concs = [0.5, 1, 2, 5, 10, 20];
+  const areas = concs.map(c => baseArea * c / 5 + (Math.random() - 0.5) * baseArea * 0.03);
+  const n = concs.length;
+  const sumX = concs.reduce((a, b) => a + b, 0), sumY = areas.reduce((a, b) => a + b, 0);
+  const sumXY = concs.reduce((s, x, i) => s + x * areas[i], 0);
+  const sumX2 = concs.reduce((s, x) => s + x * x, 0);
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  const intercept = (sumY - slope * sumX) / n;
+  const meanY = sumY / n;
+  const ssTot = areas.reduce((s, y) => s + Math.pow(y - meanY, 2), 0);
+  const ssRes = areas.reduce((s, y, i) => s + Math.pow(y - (slope * concs[i] + intercept), 2), 0);
+  const r2 = 1 - ssRes / ssTot;
+
+  Plotly.newPlot('calibPlot', [
+    { x: concs, y: areas, mode: 'markers', type: 'scatter', marker: { color: '#1554c7', size: 8 }, name: 'Точки' },
+    {
+      x: [0, Math.max(...concs)], y: [intercept, intercept + slope * Math.max(...concs)],
+      mode: 'lines', type: 'scatter', line: { color: '#d97706', width: 1.5, dash: 'dash' },
+      name: `R²=${r2.toFixed(4)}`,
+    },
+  ], {
+    margin: { l: 46, r: 10, t: 6, b: 34 }, paper_bgcolor: '#fff', plot_bgcolor: '#fff',
+    xaxis: { title: { text: 'Концентрация', font: { size: 10 } }, gridcolor: '#eee', tickfont: { size: 9 } },
+    yaxis: { title: { text: 'Площадь', font: { size: 10 } }, gridcolor: '#eee', tickfont: { size: 9 } },
+    legend: { font: { size: 9 } },
+  }, { displaylogo: false, responsive: true });
+}
+
+function renderOverlayChips() {
+  const all = [{ label: 'Текущий метод', color: OVERLAY_COLORS[0] }, ...overlayRuns];
+  $('overlayChips').innerHTML = all.map(r =>
+    `<span class="method-chip"><span class="dot" style="background:${r.color}"></span>${r.label}</span>`).join('');
+}
+
+function renderAll(result, state) {
+  renderKPIs(result);
+  renderChromatogram(result, state);
+  renderTable(result);
+  renderDAD(result);
+  renderCalibration(result);
+  renderOverlayChips();
+}
+
+// ---------------- Optimization (in-browser simplified GA) ----------------
+function optimizeConditions() {
+  const state = collectState();
+  let best = null, bestScore = -Infinity;
+  const pop = Array.from({ length: 16 }, () => ({
+    phi: Math.random() * 0.9 + 0.05, flow: Math.random() * 1.7 + 0.3,
+  }));
+  for (let gen = 0; gen < 10; gen++) {
+    const scored = pop.map(ind => {
+      const s = { ...state };
+      s.method = { ...s.method, mode: 'isocratic', isocratic_phi: ind.phi };
+      s.mobilePhase = { ...s.mobilePhase, flow_ml_min: ind.flow };
+      const r = Engine.runSimulation(s);
+      const rsVals = r.peaks.filter(p => p.Rs_vs_prev !== undefined).map(p => p.Rs_vs_prev);
+      const penalty = rsVals.reduce((s2, rs) => s2 + Math.pow(Math.max(0, 1.5 - rs), 2), 0);
+      const score = -penalty - 0.02 * state.method.run_time_min;
+      return { ind, score, r };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    if (scored[0].score > bestScore) { bestScore = scored[0].score; best = scored[0]; }
+    const elite = scored.slice(0, 4).map(s => s.ind);
+    const nextPop = [...elite];
+    while (nextPop.length < 16) {
+      const p1 = elite[Math.floor(Math.random() * elite.length)];
+      const p2 = elite[Math.floor(Math.random() * elite.length)];
+      const a = Math.random();
+      nextPop.push({
+        phi: Math.min(0.95, Math.max(0.05, a * p1.phi + (1 - a) * p2.phi + (Math.random() - 0.5) * 0.05)),
+        flow: Math.min(2.0, Math.max(0.3, a * p1.flow + (1 - a) * p2.flow + (Math.random() - 0.5) * 0.1)),
+      });
+    }
+    pop.length = 0; pop.push(...nextPop);
+  }
+  if (best) {
+    $('mode').value = 'isocratic'; toggleModeBlocks();
+    $('isoPhi').value = best.ind.phi.toFixed(3);
+    $('flow').value = best.ind.flow.toFixed(2);
+    alert(`Оптимизация завершена (GA, 10 поколений):\nφ(B) = ${best.ind.phi.toFixed(3)}\nРасход = ${best.ind.flow.toFixed(2)} мл/мин\nЦелевая функция = ${best.score.toFixed(3)}`);
+    runSimulation();
+  }
+}
+
+// ---------------- Wiring ----------------
+function toggleModeBlocks() {
+  const mode = $('mode').value;
+  $('isocraticBlock').style.display = mode === 'isocratic' ? 'block' : 'none';
+  $('gradientBlock').style.display = mode === 'isocratic' ? 'none' : 'block';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  renderCompoundRows();
+  toggleModeBlocks();
+
+  $('mode').addEventListener('change', toggleModeBlocks);
+  $('runBtn').addEventListener('click', runSimulation);
+  $('optimizeBtn').addEventListener('click', optimizeConditions);
+
+  $('addCompoundBtn').addEventListener('click', () => {
+    compounds.push({ name: 'Новый компонент', k_w: 5, S: 3.5, dH_J_mol: -20000, tau_rel: 0.15, response_factor: 1.0 });
+    renderCompoundRows();
+  });
+
+  $('addOverlayBtn').addEventListener('click', () => {
+    if (!lastResult) return;
+    if (overlayRuns.length >= 2) { alert('Максимум 3 метода в оверлее (текущий + 2).'); return; }
+    const color = OVERLAY_COLORS[overlayRuns.length + 1];
+    overlayRuns.push({ label: `Метод сравнения ${overlayRuns.length + 1}`, color, result: lastResult });
+    renderChromatogram(lastResult, collectState());
+    renderOverlayChips();
+  });
+
+  $('clearOverlayBtn').addEventListener('click', () => {
+    overlayRuns = [];
+    if (lastResult) renderChromatogram(lastResult, collectState());
+    renderOverlayChips();
+  });
+
+  $('apiConnectBtn').addEventListener('click', () => {
+    const url = $('apiUrl').value.trim().replace(/\/$/, '');
+    if (!url) { apiBase = null; $('engineStatus').textContent = '● Engine: JS local (standalone demo)'; return; }
+    fetch(url + '/health').then(r => r.json()).then(() => {
+      apiBase = url;
+      $('engineStatus').textContent = '● Engine: FastAPI backend @ ' + url;
+    }).catch(() => {
+      apiBase = null;
+      alert('Не удалось подключиться к API по адресу ' + url + '. Используется локальный JS-движок.');
+    });
+  });
+
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      $('dadTab').style.display = tab.dataset.tab === 'dad' ? 'block' : 'none';
+      $('calibTab').style.display = tab.dataset.tab === 'calib' ? 'block' : 'none';
+    });
+  });
+
+  setInterval(() => { $('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
+
+  runSimulation();
+});
