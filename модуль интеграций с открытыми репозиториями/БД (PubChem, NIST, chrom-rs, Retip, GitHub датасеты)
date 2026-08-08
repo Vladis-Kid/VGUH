@@ -1,0 +1,461 @@
+"""
+hplc_sim.integrations
+======================
+Thin, dependency-light clients for free/open external resources.
+Each module degrades gracefully (returns None / raises a clear error)
+if network access or the optional dependency is unavailable, so the
+core simulator NEVER hard-depends on any of these.
+"""
+
+"""
+PubChem PUG-REST client (free, no API key).
+Docs: https://pubchemdocs.ncbi.nlm.nih.gov/pug-rest
+
+Used to auto-populate Compound.logP and molecular weight, which feed
+a simple QSAR-style estimate of k_w / S when no experimental value exists.
+"""
+import requests
+
+BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+
+
+def fetch_cid_by_name(name: str) -> int | None:
+    url = f"{BASE}/compound/name/{name}/cids/JSON"
+    r = requests.get(url, timeout=10)
+    if r.status_code != 200:
+        return None
+    return r.json().get("IdentifierList", {}).get("CID", [None])[0]
+
+
+def fetch_properties(name: str) -> dict | None:
+    """Returns XLogP, molecular weight, TPSA, H-bond donors/acceptors for a compound name."""
+    cid = fetch_cid_by_name(name)
+    if cid is None:
+        return None
+    props = "XLogP,MolecularWeight,TPSA,HBondDonorCount,HBondAcceptorCount,CanonicalSMILES"
+    url = f"{BASE}/compound/cid/{cid}/property/{props}/JSON"
+    r = requests.get(url, timeout=10)
+    if r.status_code != 200:
+        return None
+    result = r.json()["PropertyTable"]["Properties"][0]
+    result["CID"] = cid
+    return result
+
+
+def estimate_rp_params_from_logp(xlogp: float) -> dict:
+    """
+    Very rough QSAR heuristic (linear free-energy relationship) mapping
+    XLogP -> starting k_w / S for reverse-phase C18, calibrated to
+    typical literature ranges. Meant as a *seed* value for the simulator,
+    to be refined by Retip/RT-Transformer or real calibration data.
+    """
+    k_w = max(0.5, 10 ** (0.4 * xlogp + 0.3))
+    S = max(1.5, min(7.0, 2.5 + 0.35 * xlogp))
+    return {"k_w": round(k_w, 3), "S": round(S, 3)}
+
+
+
+
+
+"""
+NIST Chemistry WebBook (free, no auth) - reference physicochemical & GC
+retention-index data for validation/benchmarking.
+https://webbook.nist.gov/chemistry/
+
+NIST does not expose a formal JSON REST API; this client does a best-effort
+HTML fetch + light parsing of the public search page. For production use,
+prefer downloading the NIST Retention Index Database bulk files and loading
+them locally (see `load_local_ri_database`).
+"""
+import re
+import requests
+
+SEARCH_URL = "https://webbook.nist.gov/cgi/cbook.cgi"
+
+
+def search_by_name(name: str) -> dict | None:
+    params = {"Name": name, "Units": "SI"}
+    r = requests.get(SEARCH_URL, params=params, timeout=10)
+    if r.status_code != 200:
+        return None
+    html = r.text
+    cas_match = re.search(r"CAS Registry Number:</strong>\s*([\d-]+)", html)
+    formula_match = re.search(r"Formula:</strong>\s*([A-Za-z0-9]+)", html)
+    return {
+        "name": name,
+        "cas": cas_match.group(1) if cas_match else None,
+        "formula": formula_match.group(1) if formula_match else None,
+        "source_url": r.url,
+    }
+
+
+def load_local_ri_database(csv_path: str):
+    """
+    Load a locally downloaded NIST Retention Index Database export (CSV)
+    for offline validation of predicted retention against reference GC/LC RI values.
+    Expected columns: compound_name, cas, retention_index, column_type, conditions
+    """
+    import csv
+    rows = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            rows.append(row)
+    return rows
+
+
+
+"""
+Bridge to Retip / pyRetip (open-source ML retention-time prediction).
+Repo: https://github.com/oloBion/Retip  (R + Python 'pyRetip')
+
+This module is OPTIONAL: if pyRetip is not installed, `predict_rt` raises
+ImportError with install instructions instead of crashing the simulator.
+
+Typical use in this project: predict a seed retention time for a new
+compound from its structure (SMILES), then convert to k_w/S by fitting
+two isocratic simulator runs to match the predicted tR (see `calibrate_k_w_S`).
+"""
+from typing import Optional
+
+
+def predict_rt(smiles: str, model_name: str = "default") -> float:
+    try:
+        import pyretip  # type: ignore
+    except ImportError as e:
+        raise ImportError(
+            "pyRetip is not installed. Install with: pip install pyretip\n"
+            "Repo: https://github.com/oloBion/Retip"
+        ) from e
+    model = pyretip.load_model(model_name)
+    return float(model.predict([smiles])[0])
+
+
+def calibrate_k_w_S(predicted_tR: float, t0: float, phi_low: float = 0.1, phi_high: float = 0.9) -> dict:
+    """
+    Given a single predicted tR (e.g. from Retip/RT-Transformer) at a *reference*
+    isocratic composition, back-calculate an approximate k_w assuming a typical
+    S (since one data point cannot resolve two unknowns). This is a seed value,
+    intended to be refined once >=2 real/predicted retention times are available
+    (then k_w and S can be solved exactly from the LSS linear system).
+    """
+    import math
+    k_ref = max((predicted_tR - t0) / max(t0, 1e-9), 1e-3)
+    S_assumed = 4.0  # typical small-molecule RP default
+    phi_ref = (phi_low + phi_high) / 2.0
+    log_k_w = math.log10(k_ref) + S_assumed * phi_ref
+    return {"k_w": round(10 ** log_k_w, 3), "S": S_assumed}
+
+
+def solve_k_w_S_from_two_points(tR1: float, phi1: float, tR2: float, phi2: float, t0: float) -> dict:
+    """Exact solution of log10(k) = log10(k_w) - S*phi from two (phi, tR) pairs."""
+    import math
+    k1 = max((tR1 - t0) / t0, 1e-6)
+    k2 = max((tR2 - t0) / t0, 1e-6)
+    S = (math.log10(k1) - math.log10(k2)) / (phi2 - phi1)
+    log_k_w = math.log10(k1) + S * phi1
+    return {"k_w": round(10 ** log_k_w, 4), "S": round(S, 4)}
+
+
+
+
+"""
+Bridge to chrom-rs (Rust chromatography PDE simulator, Langmuir isotherms,
+Euler/RK4 solvers). Repo: https://github.com/biface/chromatography
+
+This project's Python model (models.py) uses fast closed-form / ODE-lite
+LSS equations for interactive, real-time editing. When higher physical
+fidelity is needed (nonlinear/competitive adsorption, overloaded columns,
+preparative-scale effects), delegate to chrom-rs as an external process:
+
+    1. Write a YAML config (see `build_chromrs_config`)
+    2. Run the compiled chrom-rs binary (`cargo install --path .` from the repo,
+       or a prebuilt binary you ship alongside this module)
+    3. Parse its CSV/JSON output back into this module's peak schema.
+
+This keeps chrom-rs as an OPTIONAL high-accuracy backend rather than a
+hard dependency, matching the "choose model by required precision" design.
+"""
+import json
+import subprocess
+import tempfile
+import os
+from typing import Dict, List
+
+
+def build_chromrs_config(column: Dict, compounds: List[Dict], flow_ml_min: float,
+                          injection_profile: str = "gaussian") -> dict:
+    return {
+        "column": {
+            "length_m": column["length_mm"] / 1000.0,
+            "diameter_m": column["id_mm"] / 1000.0,
+            "porosity": column.get("porosity", 0.65),
+        },
+        "flow_m3_s": flow_ml_min * 1e-6 / 60.0,
+        "injection": {"profile": injection_profile},
+        "solutes": [
+            {
+                "name": c["name"],
+                "isotherm": "langmuir",
+                "params": {"k_eq": c.get("k_w", 1.0), "q_max": c.get("q_max", 10.0)},
+            }
+            for c in compounds
+        ],
+        "solver": "rk4",
+    }
+
+
+def run_chromrs(config: dict, binary_path: str = "chrom-rs") -> dict:
+    """
+    Executes the chrom-rs binary against a temp YAML config and returns
+    parsed JSON results. Requires the binary to be built/installed separately
+    (see repo README: https://github.com/biface/chromatography).
+    """
+    import yaml  # PyYAML
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.safe_dump(config, f)
+        cfg_path = f.name
+    out_path = cfg_path.replace(".yaml", ".json")
+    try:
+        subprocess.run(
+            [binary_path, "--config", cfg_path, "--output", out_path, "--format", "json"],
+            check=True, capture_output=True, timeout=120,
+        )
+        with open(out_path) as f:
+            return json.load(f)
+    finally:
+        for p in (cfg_path, out_path):
+            if os.path.exists(p):
+                os.remove(p)
+
+
+
+
+
+"""
+Loaders for free, open GitHub-hosted chromatography datasets/tools used to
+validate the simulator against real experimental data (per project brief:
+"compare simulation vs several dozen test mixtures").
+
+All fetches use raw.githubusercontent.com — no auth needed for public repos.
+Swap REPO_* constants for a fork/mirror if you vendor the data into your
+own GitHub project (recommended for reproducibility / rate-limit safety).
+"""
+import requests
+import io
+import csv
+
+# Known open repositories relevant to this project (see integration report):
+KNOWN_REPOS = {
+    "hplc_simulator_excel": "https://github.com/mlibby/hplc_simulator",
+    "chrom_rs": "https://github.com/biface/chromatography",
+    "retip": "https://github.com/oloBion/Retip",
+    "rt_transformer": "https://github.com/Qiong-Yang/RT-Transformer",
+    "mzrtsim": "https://github.com/yufree/mzrtsim",
+    "openchrom": "https://github.com/OpenChrom/openchrom",
+    "chromatography_modeling": "https://github.com/icredd-cheminfo/chromatography-modeling",
+    "chromatographic_data": "https://github.com/mpho-mafata/Chromatographic-data",
+    "analytical_chem_tools": "https://github.com/pb-cdunn/analytical-chemistry-tools-calculators-and-simulators",
+    "gc2asm": "https://github.com/IFPen/GC2ASM",
+}
+
+
+def fetch_raw_csv(repo_raw_url: str) -> list[dict]:
+    """
+    repo_raw_url must be a raw.githubusercontent.com URL to a CSV file, e.g.:
+    https://raw.githubusercontent.com/<org>/<repo>/<branch>/<path>/data.csv
+    """
+    r = requests.get(repo_raw_url, timeout=15)
+    r.raise_for_status()
+    reader = csv.DictReader(io.StringIO(r.text))
+    return list(reader)
+
+
+def validate_against_reference(simulated_peaks: list[dict], reference_csv_rows: list[dict],
+                                name_key: str = "compound_name", tR_key: str = "tR_observed") -> dict:
+    """
+    Compares simulator tR predictions against an experimental reference table
+    (loaded via fetch_raw_csv or nist_webbook.load_local_ri_database).
+    Returns per-compound error and aggregate RMSE/MAE — the core of the
+    "simulation vs real data" validation step required by the project brief.
+    """
+    ref_by_name = {row[name_key]: float(row[tR_key]) for row in reference_csv_rows if row.get(tR_key)}
+    errors = []
+    per_compound = []
+    for p in simulated_peaks:
+        name = p["name"]
+        if name in ref_by_name:
+            err = p["tR"] - ref_by_name[name]
+            errors.append(err)
+            per_compound.append({
+                "name": name, "tR_sim": p["tR"], "tR_ref": ref_by_name[name],
+                "abs_error_min": round(abs(err), 4),
+                "rel_error_pct": round(abs(err) / ref_by_name[name] * 100, 2) if ref_by_name[name] else None,
+            })
+    if not errors:
+        return {"per_compound": [], "rmse": None, "mae": None}
+    rmse = (sum(e ** 2 for e in errors) / len(errors)) ** 0.5
+    mae = sum(abs(e) for e in errors) / len(errors)
+    return {"per_compound": per_compound, "rmse": round(rmse, 4), "mae": round(mae, 4), "n": len(errors)}
+
+
+
+
+"""
+hplc_sim.optimization
+======================
+Optional extension: search for HPLC conditions that maximize overall
+resolution / minimize run time, using either Monte Carlo random search
+or a lightweight genetic algorithm (no external GA library dependency).
+"""
+from __future__ import annotations
+import random
+import copy
+from typing import Dict, List, Tuple
+
+from .simulator import HPLCSimulator
+
+
+def _score(result: Dict, target_rs: float = 1.5) -> float:
+    """Fitness: reward resolved peaks, penalize long run time and under-resolved pairs."""
+    peaks = result["peaks"]
+    if not peaks:
+        return -1e9
+    rs_values = [p.get("Rs_vs_prev") for p in peaks if p.get("Rs_vs_prev") is not None]
+    if not rs_values:
+        rs_penalty = 0.0
+    else:
+        rs_penalty = sum(max(0.0, target_rs - rs) ** 2 for rs in rs_values)
+    run_time = result["method"]["run_time_min"]
+    return -rs_penalty - 0.02 * run_time  # higher is better
+
+
+def monte_carlo_optimize(
+    sim: HPLCSimulator,
+    n_iter: int = 200,
+    phi_bounds: Tuple[float, float] = (0.05, 0.95),
+    flow_bounds: Tuple[float, float] = (0.3, 2.0),
+) -> Dict:
+    """Random search over isocratic phi and flow rate."""
+    best = None
+    best_score = -1e18
+    for _ in range(n_iter):
+        phi = random.uniform(*phi_bounds)
+        flow = random.uniform(*flow_bounds)
+        sim.patch_method(isocratic_phi=phi, mode="isocratic")
+        sim.patch_flow(flow)
+        result = sim.run(add_noise=False, n_points=1500)
+        s = _score(result)
+        if s > best_score:
+            best_score = s
+            best = {"phi": phi, "flow_ml_min": flow, "score": s, "result": result}
+    return best
+
+
+def genetic_optimize(
+    sim: HPLCSimulator,
+    population_size: int = 24,
+    generations: int = 15,
+    phi_bounds: Tuple[float, float] = (0.05, 0.95),
+    flow_bounds: Tuple[float, float] = (0.3, 2.0),
+    mutation_rate: float = 0.2,
+) -> Dict:
+    """Simple real-valued GA (tournament selection, blend crossover, gaussian mutation)."""
+    def random_individual():
+        return [random.uniform(*phi_bounds), random.uniform(*flow_bounds)]
+
+    def evaluate(ind):
+        sim.patch_method(isocratic_phi=ind[0], mode="isocratic")
+        sim.patch_flow(ind[1])
+        result = sim.run(add_noise=False, n_points=1200)
+        return _score(result), result
+
+    population = [random_individual() for _ in range(population_size)]
+    best_overall = None
+    best_overall_score = -1e18
+
+    for gen in range(generations):
+        scored = [(ind, *evaluate(ind)) for ind in population]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        if scored[0][1] > best_overall_score:
+            best_overall_score = scored[0][1]
+            best_overall = {"phi": scored[0][0][0], "flow_ml_min": scored[0][0][1],
+                             "score": scored[0][1], "result": scored[0][2]}
+
+        # elitism: keep top 20%
+        n_elite = max(1, population_size // 5)
+        new_population = [ind for ind, _, _ in scored[:n_elite]]
+
+        # tournament selection + blend crossover
+        while len(new_population) < population_size:
+            p1 = min(random.sample(scored, 3), key=lambda x: -x[1])[0]
+            p2 = min(random.sample(scored, 3), key=lambda x: -x[1])[0]
+            alpha = random.random()
+            child = [alpha * p1[i] + (1 - alpha) * p2[i] for i in range(2)]
+            if random.random() < mutation_rate:
+                child[0] += random.gauss(0, 0.05)
+                child[1] += random.gauss(0, 0.1)
+            child[0] = min(max(child[0], phi_bounds[0]), phi_bounds[1])
+            child[1] = min(max(child[1], flow_bounds[0]), flow_bounds[1])
+            new_population.append(child)
+
+        population = new_population
+
+    return best_overall
+
+
+
+
+
+"""
+Generic LIMS integration stub.
+Most LIMS (LabWare, STARLIMS, LabVantage, open-source Bika/SENAITE) accept
+results either via REST/JSON, or via standard file interchange formats
+(AnIML, JCAMP-DX, ASTM E1394/SiLA2). This module implements the two
+lowest-friction, dependency-free paths:
+
+  1. Generic REST push (works with SENAITE, LabWare REST connectors, or a
+     thin custom adapter you register with your LIMS vendor).
+  2. AnIML-lite XML export (Allotrope/AnIML is emerging as the open,
+     vendor-neutral standard many chromatography data systems now support).
+"""
+import json
+import requests
+from xml.etree.ElementTree import Element, SubElement, tostring
+from typing import Dict
+
+
+def push_result_rest(lims_endpoint: str, api_key: str, run_result: Dict) -> requests.Response:
+    payload = {
+        "method": run_result["method"],
+        "column": run_result["column"],
+        "peaks": run_result["peaks"],
+        "system_suitability": run_result.get("system_suitability"),
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    return requests.post(lims_endpoint, headers=headers, data=json.dumps(payload), timeout=15)
+
+
+def export_animl_lite(run_result: Dict) -> str:
+    """Minimal AnIML-flavored XML for column/peak results (not full-schema-validated;
+    intended as a starting point to map into your LIMS' actual AnIML importer)."""
+    root = Element("AnIML")
+    exp = SubElement(root, "Experiment")
+    SubElement(exp, "Column", {
+        "name": run_result["column"]["name"],
+        "length_mm": str(run_result["column"]["length_mm"]),
+        "id_mm": str(run_result["column"]["id_mm"]),
+    })
+    result_set = SubElement(exp, "PeakResults")
+    for p in run_result["peaks"]:
+        SubElement(result_set, "Peak", {
+            "name": p["name"], "tR_min": str(p["tR"]),
+            "area": str(p["area"]), "N": str(p["N"]),
+        })
+    return tostring(root, encoding="unicode")
+
+
+
+
+
+
+
