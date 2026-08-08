@@ -1,0 +1,140 @@
+numpy>=1.24
+scipy>=1.10
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.5
+requests>=2.31
+PyYAML>=6.0
+
+# optional integrations (install as needed)
+# pyretip           # https://github.com/oloBion/Retip  (ML retention prediction)
+# pytest            # for running tests/
+
+compound_name,k_w,S,tR_observed,phi,column,note
+Uracil,0.3,1.0,1.05,0.30,C18_150x4.6_3.5um,void marker (used only for t0 sanity check)
+Acetanilide,3.2,3.1,2.95,0.30,C18_150x4.6_3.5um,literature seed value
+Caffeine,4.0,3.4,3.35,0.30,C18_150x4.6_3.5um,literature seed value
+Phenol,3.6,3.3,3.10,0.30,C18_150x4.6_3.5um,literature seed value
+Benzyl_alcohol,2.8,3.0,2.70,0.30,C18_150x4.6_3.5um,literature seed value
+Methylparaben,6.5,3.8,4.55,0.30,C18_150x4.6_3.5um,literature seed value
+Propylparaben,14.0,4.3,6.90,0.30,C18_150x4.6_3.5um,literature seed value
+Naphthalene,22.0,4.6,8.60,0.30,C18_150x4.6_3.5um,literature seed value
+Toluene,17.0,4.4,7.55,0.30,C18_150x4.6_3.5um,literature seed value
+Anthracene,55.0,5.3,12.40,0.30,C18_150x4.6_3.5um,literature seed value
+
+
+
+"""
+Demonstration of the validation workflow required by the project brief:
+"compare simulation results against real experimental data (several dozen
+test mixtures)".
+
+IMPORTANT: tests/reference_mixture_data.csv ships with illustrative
+placeholder values so this script runs end-to-end offline. For a real
+validation campaign, replace it with:
+  - your own lab's experimental results, or
+  - values pulled from the NIST Retention Index Database / ACD Labs
+    public DB (see hplc_sim/integrations/nist_webbook.py), or
+  - a GitHub-hosted reference set (see hplc_sim/integrations/github_datasets.py)
+"""
+import sys, os, csv
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from hplc_sim import Column, MobilePhase, Method, Compound, Detector, HPLCSimulator
+from hplc_sim.integrations.github_datasets import validate_against_reference
+
+CSV_PATH = os.path.join(os.path.dirname(__file__), "reference_mixture_data.csv")
+
+with open(CSV_PATH, newline="", encoding="utf-8") as f:
+    rows = list(csv.DictReader(f))
+
+compounds = [
+    Compound(name=r["compound_name"], k_w=float(r["k_w"]), S=float(r["S"]))
+    for r in rows if r["compound_name"] != "Uracil"
+]
+
+col = Column(length_mm=150, id_mm=4.6, particle_um=3.5)
+mp = MobilePhase(flow_ml_min=1.0, temperature_C=25)
+method = Method(mode="isocratic", isocratic_phi=0.30, run_time_min=15)
+sim = HPLCSimulator(col, mp, method, Detector(), compounds)
+result = sim.run(n_points=3000, add_noise=False)
+
+report = validate_against_reference(result["peaks"], rows,
+                                     name_key="compound_name", tR_key="tR_observed")
+
+print(f"{'Compound':<18}{'tR_sim':>10}{'tR_ref':>10}{'AbsErr':>10}{'RelErr%':>10}")
+for row in report["per_compound"]:
+    print(f"{row['name']:<18}{row['tR_sim']:>10.3f}{row['tR_ref']:>10.3f}"
+          f"{row['abs_error_min']:>10.3f}{row['rel_error_pct']:>10.2f}")
+print(f"\nRMSE = {report['rmse']} min | MAE = {report['mae']} min | n = {report['n']}")
+
+
+
+
+"""
+Demonstration of the validation workflow required by the project brief:
+"compare simulation results against real experimental data (several dozen
+test mixtures)".
+
+IMPORTANT: tests/reference_mixture_data.csv ships with illustrative
+placeholder values so this script runs end-to-end offline. For a real
+validation campaign, replace it with:
+  - your own lab's experimental results, or
+  - values pulled from the NIST Retention Index Database / ACD Labs
+    public DB (see hplc_sim/integrations/nist_webbook.py), or
+  - a GitHub-hosted reference set (see hplc_sim/integrations/github_datasets.py)
+"""
+import sys, os, csv
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from hplc_sim import Column, MobilePhase, Method, Compound, Detector, HPLCSimulator
+from hplc_sim.integrations.github_datasets import validate_against_reference
+
+CSV_PATH = os.path.join(os.path.dirname(__file__), "reference_mixture_data.csv")
+
+with open(CSV_PATH, newline="", encoding="utf-8") as f:
+    rows = list(csv.DictReader(f))
+
+compounds = [
+    Compound(name=r["compound_name"], k_w=float(r["k_w"]), S=float(r["S"]))
+    for r in rows if r["compound_name"] != "Uracil"
+]
+
+col = Column(length_mm=150, id_mm=4.6, particle_um=3.5)
+mp = MobilePhase(flow_ml_min=1.0, temperature_C=25)
+method = Method(mode="isocratic", isocratic_phi=0.30, run_time_min=15)
+sim = HPLCSimulator(col, mp, method, Detector(), compounds)
+result = sim.run(n_points=3000, add_noise=False)
+
+report = validate_against_reference(result["peaks"], rows,
+                                     name_key="compound_name", tR_key="tR_observed")
+
+print(f"{'Compound':<18}{'tR_sim':>10}{'tR_ref':>10}{'AbsErr':>10}{'RelErr%':>10}")
+for row in report["per_compound"]:
+    print(f"{row['name']:<18}{row['tR_sim']:>10.3f}{row['tR_ref']:>10.3f}"
+          f"{row['abs_error_min']:>10.3f}{row['rel_error_pct']:>10.2f}")
+print(f"\nRMSE = {report['rmse']} min | MAE = {report['mae']} min | n = {report['n']}")
+
+
+bash
+
+cd /home/claude/hplc-sim-module && python3 tests/validate_against_reference.py
+Output
+
+Compound              tR_sim    tR_ref    AbsErr   RelErr%
+Benzyl_alcohol         2.192     2.700     0.508     18.81
+Phenol                 2.217     3.100     0.883     28.48
+Acetanilide            2.230     2.950     0.720     24.41
+Caffeine               2.239     3.350     1.111     33.16
+Methylparaben          2.383     4.550     2.167     47.63
+Propylparaben          2.784     6.900     4.116     59.65
+Toluene                2.939     7.550     4.611     61.07
+Naphthalene            3.106     8.600     5.494     63.88
+Anthracene             3.911    12.400     8.489     68.46
+
+RMSE = 4.0543 min | MAE = 3.1221 min | n = 9
+
+
+
+
+
