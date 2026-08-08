@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HPLC Simulation &amp; Modeling — Chromatography Data System</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.32.0/plotly.min.js"></script>
+<style>
+  :root{
+    --cds-bg:#eef1f5;
+    --cds-panel:#ffffff;
+    --cds-border:#c7cdd6;
+    --cds-header:#2b3a55;
+    --cds-header2:#3c4f73;
+    --cds-text:#1c2430;
+    --cds-muted:#5c6b7a;
+    --cds-accent:#0b5fd7;
+    --trace-blue:#1554c7;
+    --trace-green:#1f8a55;
+    --trace-purple:#7b3fa0;
+    --integ-orange:#d97706;
+    --good:#1f8a55;
+    --warn:#d97706;
+    --bad:#c0392b;
+    font-family:Arial,Helvetica,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--cds-bg);color:var(--cds-text);font-size:13px;}
+  .titlebar{
+    background:linear-gradient(180deg,var(--cds-header2),var(--cds-header));
+    color:#fff;padding:8px 16px;display:flex;align-items:center;justify-content:space-between;
+    box-shadow:0 2px 4px rgba(0,0,0,.25);
+  }
+  .titlebar .brand{font-weight:700;font-size:15px;letter-spacing:.3px;}
+  .titlebar .brand small{font-weight:400;opacity:.8;margin-left:8px;font-size:11px;}
+  .titlebar .status{font-size:11px;opacity:.9;display:flex;gap:14px;}
+  .toolbar{
+    background:#dfe4ea;border-bottom:1px solid var(--cds-border);
+    padding:6px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+  }
+  .toolbar button{
+    background:var(--cds-panel);border:1px solid var(--cds-border);border-radius:3px;
+    padding:5px 10px;font-size:12px;cursor:pointer;color:var(--cds-text);
+  }
+  .toolbar button:hover{background:#f2f5f9;}
+  .toolbar button.primary{background:var(--cds-accent);color:#fff;border-color:var(--cds-accent);}
+  .toolbar .sep{width:1px;height:20px;background:var(--cds-border);margin:0 4px;}
+  .layout{display:grid;grid-template-columns:290px 1fr;gap:10px;padding:10px;}
+  .panel{
+    background:var(--cds-panel);border:1px solid var(--cds-border);border-radius:4px;
+    box-shadow:0 1px 2px rgba(0,0,0,.06);
+  }
+  .panel h3{
+    margin:0;padding:8px 12px;background:#f4f6f9;border-bottom:1px solid var(--cds-border);
+    font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--cds-header);
+  }
+  .panel .body{padding:10px 12px;}
+  .field{margin-bottom:9px;}
+  .field label{display:block;font-size:11px;color:var(--cds-muted);margin-bottom:2px;}
+  .field input, .field select{
+    width:100%;padding:4px 6px;border:1px solid var(--cds-border);border-radius:3px;font-size:12px;
+  }
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .compound-row{
+    display:grid;grid-template-columns:1fr 55px 50px 24px;gap:4px;align-items:center;margin-bottom:5px;
+  }
+  .compound-row input{padding:3px 4px;font-size:11px;}
+  .compound-row button{border:none;background:#eee;color:#900;cursor:pointer;border-radius:3px;font-size:11px;}
+  .add-compound-btn{width:100%;margin-top:4px;background:#eef3fb;border:1px dashed var(--cds-accent);
+    color:var(--cds-accent);padding:5px;border-radius:3px;cursor:pointer;font-size:12px;}
+  .main-col{display:flex;flex-direction:column;gap:10px;min-width:0;}
+  .kpi-row{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+  .kpi-tile{
+    border-radius:5px;padding:10px 12px;color:#fff;position:relative;overflow:hidden;
+  }
+  .kpi-tile .label{font-size:10px;text-transform:uppercase;opacity:.85;letter-spacing:.4px;}
+  .kpi-tile .value{font-size:22px;font-weight:700;margin-top:2px;}
+  .kpi-tile .sub{font-size:10px;opacity:.85;margin-top:1px;}
+  .kpi-good{background:linear-gradient(135deg,#1f8a55,#146b3f);}
+  .kpi-warn{background:linear-gradient(135deg,#d97706,#b45f04);}
+  .kpi-bad{background:linear-gradient(135deg,#c0392b,#962b20);}
+  .kpi-neutral{background:linear-gradient(135deg,#3c4f73,#2b3a55);}
+  #chromPlot{width:100%;height:480px;}
+  #ddadPlot{width:100%;height:190px;}
+  #calibPlot{width:100%;height:220px;}
+  .grid2{display:grid;grid-template-columns:1.6fr 1fr;gap:10px;}
+  table.results{width:100%;border-collapse:collapse;font-size:11.5px;}
+  table.results th{
+    background:#f4f6f9;border-bottom:2px solid var(--cds-border);padding:6px 8px;text-align:left;
+    position:sticky;top:0;color:var(--cds-header);font-weight:700;
+  }
+  table.results td{padding:5px 8px;border-bottom:1px solid #eceff3;}
+  table.results tr:hover td{background:#f7fafd;}
+  .legend-badge{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;}
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--cds-border);margin-bottom:0;}
+  .tab{padding:6px 14px;font-size:12px;cursor:pointer;background:#e4e8ee;border:1px solid var(--cds-border);
+    border-bottom:none;border-radius:4px 4px 0 0;color:var(--cds-muted);}
+  .tab.active{background:var(--cds-panel);color:var(--cds-header);font-weight:700;}
+  .small-note{font-size:10.5px;color:var(--cds-muted);padding:4px 12px 8px;}
+  .footer-status{
+    display:flex;justify-content:space-between;background:#e4e8ee;border-top:1px solid var(--cds-border);
+    padding:4px 14px;font-size:10.5px;color:var(--cds-muted);
+  }
+  .method-chip{display:inline-flex;align-items:center;gap:5px;background:#f4f6f9;border:1px solid var(--cds-border);
+    border-radius:12px;padding:2px 9px;font-size:11px;margin-right:6px;}
+  .method-chip .dot{width:8px;height:8px;border-radius:50%;}
+</style>
+</head>
+<body>
+
+<div class="titlebar">
+  <div class="brand">HPLC Simulation &amp; Modeling Console <small>Chromatography Data System — v0.1</small></div>
+  <div class="status">
+    <span id="engineStatus">● Engine: JS local (standalone demo)</span>
+    <span id="clock"></span>
+  </div>
+</div>
+
+<div class="toolbar">
+  <button class="primary" id="runBtn">▶ Запустить симуляцию</button>
+  <button id="addOverlayBtn">＋ Добавить в оверлей</button>
+  <button id="clearOverlayBtn">✕ Очистить оверлей</button>
+  <div class="sep"></div>
+  <button id="optimizeBtn">⚙ Оптимизация условий (GA)</button>
+  <div class="sep"></div>
+  <span style="font-size:11px;color:#556">Backend API (опц.):</span>
+  <input id="apiUrl" placeholder="http://localhost:8000" style="width:190px;padding:4px 6px;border:1px solid #c7cdd6;border-radius:3px;font-size:11px;">
+  <button id="apiConnectBtn">Подключить</button>
+</div>
+
+<div class="layout">
+  <!-- LEFT: CONDITIONS PANEL -->
+  <div class="main-col" style="gap:10px;">
+    <div class="panel">
+      <h3>Колонка</h3>
+      <div class="body">
+        <div class="field"><label>Тип</label>
+          <select id="colType">
+            <option value="RP" selected>Обращённо-фазовая (RP-C18)</option>
+            <option value="NP">Нормально-фазовая</option>
+            <option value="IEX">Ионообменная</option>
+            <option value="HILIC">HILIC</option>
+          </select>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Длина, мм</label><input id="colLength" type="number" value="150"></div>
+          <div class="field"><label>Внутр. диам., мм</label><input id="colID" type="number" value="4.6" step="0.1"></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Размер частиц, мкм</label><input id="colParticle" type="number" value="3.5" step="0.1"></div>
+          <div class="field"><label>N/м (номинал)</label><input id="colNnom" type="number" value="80000"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Подвижная фаза</h3>
+      <div class="body">
+        <div class="row2">
+          <div class="field"><label>Расход, мл/мин</label><input id="flow" type="number" value="1.0" step="0.1"></div>
+          <div class="field"><label>Температура, °C</label><input id="temp" type="number" value="25" step="1"></div>
+        </div>
+        <div class="field"><label>Режим</label>
+          <select id="mode">
+            <option value="isocratic">Изократический</option>
+            <option value="gradient" selected>Градиентный</option>
+            <option value="step">Ступенчатый</option>
+          </select>
+        </div>
+        <div id="isocraticBlock" class="field" style="display:none;">
+          <label>Доля сильного растворителя φ(B)</label>
+          <input id="isoPhi" type="number" value="0.4" step="0.01" min="0" max="1">
+        </div>
+        <div id="gradientBlock">
+          <label style="font-size:11px;color:#5c6b7a;">Градиент (время мин / %B), через ; </label>
+          <input id="gradProfile" value="0,5;2,5;14,90;16,90;16.1,5;20,5" style="width:100%;padding:4px 6px;border:1px solid #c7cdd6;border-radius:3px;font-size:11px;">
+          <div class="small-note" style="padding:4px 0 0;">Формат: t1,%B1;t2,%B2;...</div>
+        </div>
+        <div class="row2" style="margin-top:6px;">
+          <div class="field"><label>Время анализа, мин</label><input id="runTime" type="number" value="20"></div>
+          <div class="field"><label>Dwell time, мин</label><input id="dwell" type="number" value="0.5" step="0.1"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Детектор</h3>
+      <div class="body">
+        <div class="field"><label>Тип</label>
+          <select id="detType"><option>UV</option><option>DAD</option><option>MS</option><option>RI</option></select>
+        </div>
+        <div class="row2">
+          <div class="field"><label>λ, нм</label><input id="wavelength" type="number" value="254"></div>
+          <div class="field"><label>Порог, мАU</label><input id="threshold" type="number" value="1.0" step="0.1"></div>
+        </div>
+        <div class="field"><label>Шум базовой линии, мАU</label><input id="noise" type="number" value="0.15" step="0.01"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Компоненты пробы</h3>
+      <div class="body" id="compoundsBody">
+        <!-- rows injected by JS -->
+      </div>
+      <div class="body" style="padding-top:0;">
+        <button class="add-compound-btn" id="addCompoundBtn">＋ Добавить компонент</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: RESULTS -->
+  <div class="main-col">
+    <div class="kpi-row" id="kpiRow"></div>
+
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--cds-border);background:#f4f6f9;">
+        <h3 style="border:none;padding:0;background:none;">Хроматограмма</h3>
+        <div id="overlayChips"></div>
+      </div>
+      <div class="body" style="padding:6px;">
+        <div id="chromPlot"></div>
+        <div class="small-note">Двойной клик по графику — сброс масштаба. Зажмите ЛКМ и потяните — приближение области. Наведите курсор на пик — подсказка.</div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h3>Результаты интегрирования</h3>
+        <div class="body" style="max-height:280px;overflow:auto;padding:0;">
+          <table class="results" id="resultsTable">
+            <thead><tr>
+              <th>#</th><th>Компонент</th><th>tR, мин</th><th>k'</th><th>α</th><th>Rs</th>
+              <th>N</th><th>HETP, мкм</th><th>Площадь</th><th>Высота, мАУ</th><th>As</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="tabs" style="margin:0;padding:0 8px;">
+          <div class="tab active" data-tab="dad">DAD-карта (2D)</div>
+          <div class="tab" data-tab="calib">Калибровка</div>
+        </div>
+        <div class="body" id="dadTab"><div id="ddadPlot"></div>
+          <div class="small-note">Контур: время × длина волны × интенсивность (симуляция диодно-матричного детектора).</div>
+        </div>
+        <div class="body" id="calibTab" style="display:none;"><div id="calibPlot"></div>
+          <div class="small-note">Площадь пика vs концентрация, линейная регрессия (демо-калибровка).</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="footer-status">
+  <span id="footerLeft">Готов к запуску</span>
+  <span id="footerRight">HPLC Simulation &amp; Modeling Module · demo build</span>
+</div>
+
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
